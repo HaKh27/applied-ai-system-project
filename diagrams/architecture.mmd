@@ -1,0 +1,14 @@
+flowchart TD
+    A["Input: pet species + existing tasks"] --> B["Retriever + Gap Detector (no AI)\nlooks up species guidelines, finds missing categories"]
+    B -->|gap found| C["Agent: draft_suggestion()\nasks Claude, grounded in the guideline text\nvalidates the draft and retries on bad output, up to 3 tries"]
+    B -->|no gaps| F["No suggestion"]
+    C -->|valid and de-conflicted| D{"Human checkpoint\nKeep or Reject"}
+    D -->|Keep| E["pet.add_task(), then Scheduler.build_plan()\nfinal schedule"]
+    D -->|Reject| F
+
+    T["Automated tester, offline\ntests/test_ai_suggestions.py"] -.->|verifies| B
+    T -.->|verifies| C
+
+    L[("Logging: console and pawpal.log")]
+    C -.-> L
+    D -.-> L
