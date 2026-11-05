@@ -106,7 +106,27 @@ class Pet:
     tasks: List[Task] = field(default_factory=list)
 
     def add_task(self, task: Task) -> None:
-        """Add a task to this pet."""
+        """Add a task to this pet, rejecting an exact duplicate.
+
+        A duplicate is the same name (case-insensitive), start time and due date as a task
+        this pet already has -- e.g. two "Morning walk"s both at 07:30 today. A second walk at
+        a different time, or the same walk on a different day (such as a recurring task's next
+        occurrence), is not a duplicate and is allowed.
+        """
+        duplicate = next(
+            (
+                t for t in self.tasks
+                if t.due_date == task.due_date
+                and t.start_time == task.start_time
+                and t.name.strip().lower() == task.name.strip().lower()
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise ValueError(
+                f"{self.name} already has '{duplicate.name}' at {task.start_time:%H:%M} "
+                f"on {task.due_date}"
+            )
         self.tasks.append(task)
 
     def _find_task(self, task_id: int) -> Task:
@@ -281,7 +301,7 @@ class Scheduler:
                 clash = next((p for p in placed if slot < p[1] and p[0] < slot + length), None)
                 if clash is None:
                     break
-                blocker = blocker or clash[2]
+                blocker = clash[2]  # the most recent clash is the one that set the final slot
                 slot = clash[1]
 
             if slot + length > window_end:

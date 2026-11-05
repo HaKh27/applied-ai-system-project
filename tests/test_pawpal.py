@@ -23,6 +23,26 @@ def test_adding_task_increases_pet_task_count():
     assert len(pet.tasks) == 1
 
 
+def test_add_task_rejects_exact_duplicate_same_day():
+    pet = Pet("Rex", "dog")
+    pet.add_task(Task("Morning walk", time(7, 30), 30))
+
+    with pytest.raises(ValueError):
+        pet.add_task(Task("morning walk", time(7, 30), 20))  # case/duration differ, still a dup
+
+    assert len(pet.tasks) == 1
+
+
+def test_add_task_allows_same_name_at_a_different_time_or_day():
+    pet = Pet("Rex", "dog")
+    pet.add_task(Task("Walk", time(7, 30), 30))
+
+    pet.add_task(Task("Walk", time(18, 0), 30))  # second walk, different time: allowed
+    pet.add_task(Task("Walk", time(7, 30), 30, due_date=date.today() + timedelta(days=1)))
+
+    assert len(pet.tasks) == 3
+
+
 def _scheduler_with(task):
     owner = Owner("Jordan", time(7, 0), time(20, 0))
     pet = Pet("Rex", "dog")
