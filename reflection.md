@@ -20,8 +20,8 @@ Owners have pets, pets have tasks, and the scheduler reads from the owner and pr
 
 The requirements the design is built around:
 
-1. A user can assign each task a priority of Low, Medium or High (default: Medium). The scheduler places higher-priority tasks first. When the day can't fit everything, lower-priority tasks are dropped first, and the plan lists each dropped task with the reason. Ties within the same priority go to the task with the earlier scheduled time. If the times are also equal, the task that was logged first goes first.
-2. A user can add tasks with a name, a fixed start time, a duration and a priority. End time is computed as start time plus duration. The scheduler detects when two tasks overlap in time. When there's a conflict, the higher-priority task keeps its slot. The lower-priority task is moved to the next free slot later in the day, or dropped if there isn't one, and the plan explains either outcome. A task must fit entirely inside the owner's available window. A task that starts before the window, or can't fit before it closes, is dropped with the reason "outside available window". A task that starts inside the window but overlaps a higher-priority task is moved or dropped as described above. Equal-priority conflicts use the same tie-break as item 1.
+1. Tasks have a priority (Low, Medium or High, default Medium); the scheduler places higher-priority tasks first and drops lower-priority ones when the day is full, always explaining why. Ties go to the earlier time, then whichever task was logged first.
+2. Each task has a name, start time, duration and priority, with end time computed automatically. On a conflict the higher-priority task keeps its slot and the other is moved to the next free slot or dropped, with the reason always explained. A task must fit inside the owner's window or it's dropped; equal-priority conflicts use the same tie-break as item 1.
 3. A user can enter owner info (name and daily available window, a start and end time) and add one or more pets (name and species). Each task belongs to a pet. A user can add, edit or remove a task, and the plan regenerates from the updated list.
 4. A user can view a generated daily plan, ordered by start time. Each entry shows the pet, task, start time, duration and priority. Beside it, the plan explains why each task was kept, moved or dropped. Dropped tasks are listed separately with their reason.
 
@@ -59,16 +59,16 @@ The scheduler considers four constraints:
 - **Priority.** Each task is Low, Medium or High (default Medium), and it decides who keeps a slot in a conflict.
 - **Task status and date.** Only pending tasks due that day are planned, so completed tasks and tomorrow's recurring copies stay out of today's plan.
 
-I put the window first, because a plan that runs outside the hours the owner is available is useless. Priority comes next, ahead of time, because in pet care the importance of a task matters more than when it was asked for: a medication or feeding must happen, while a play session can move. Time is the tie-breaker, with the earlier task winning and creation order deciding any remaining tie. I left out owner preferences and flexible time windows on purpose. They add a lot of complexity, and the fixed times plus priorities already cover the main scenario.
+I ranked them window first (a plan outside available hours is useless), then priority (a medication matters more than when it was asked for), then time as the tie-breaker. I left out owner preferences and flexible windows on purpose — they add complexity the main scenario doesn't need.
 
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
 - Why is that tradeoff reasonable for this scenario?
 
-My scheduler places tasks greedily in priority order and never reshuffles a higher-priority task to make room for a lower one. A high-priority task always keeps its slot, and any lower-priority task that overlaps it is moved to the next free slot later in the day or dropped. The cost is that this may not keep the most tasks possible. In some cases, moving the high-priority task or letting a lower-priority task win would have let two or three other tasks fit instead of dropping them. Finding that best arrangement means trying many combinations of tasks, which is much more complex to build, test and explain.
+The scheduler places tasks greedily by priority and never reshuffles a higher-priority task to make room for a lower one — an overlapping lower-priority task is just moved or dropped. The cost: this isn't always the arrangement that keeps the most tasks overall, since finding that would mean trying many combinations, which is much harder to build, test and explain.
 
-This is reasonable for pet care because the priorities mean something real: a medication or feeding must happen, and a play session can wait. The plan is also easy to predict and to explain. Each decision is one sentence ("moved because it overlapped a higher-priority task"), which matters since the plan has to show its reasoning. A day has a few dozen tasks, so the simple rule is good enough, and the user can always edit a task's time or priority if they disagree with the result.
+This fits pet care, where priorities mean something real (medication must happen, play can wait) and a plan that explains itself in one sentence per decision matters more than squeezing in one extra task. With only a few dozen tasks a day the simple rule is good enough, and the user can always adjust a task's time or priority.
 
 ---
 
@@ -88,16 +88,16 @@ I used an AI coding assistant (Claude Code) for almost every stage:
 - **UI and docs.** It added the pet and status filters and the custom species box to the Streamlit app, checked the UML against the final code, and drafted the README's Features list and Demo Walkthrough, which I reviewed and corrected.
 - **Tests.** It drafted the pytest tests, and we ran them after each step.
 
-The most helpful prompts were specific and asked for a judgment. "Do you think this has too much going on, or is it just right according to the requirements?" and "if anything is redundant work, simplify it" led to real simplifications. "Review the skeleton for missing relationships or potential logic bottlenecks" caught problems early, such as the plan being duplicated on rebuild and tasks wrapping past midnight. Working one step at a time and approving each change before it was made kept me in control of the design.
+The most helpful prompts asked for a judgment, not just an action — "is this too much, or just right?" and "simplify anything redundant" led to real simplifications, and "review for missing relationships or logic bottlenecks" caught problems early, like the plan duplicating on rebuild. Working one step at a time, approving each change before it was made, kept me in control of the design.
 
 **b. Judgment and verification**
 
 - Describe one moment where you did not accept an AI suggestion as-is.
 - How did you evaluate or verify what the AI suggested?
 
-The first UML draft the AI gave me had a separate `Plan` class that held the scheduled and dropped lists, plus `PlanEntry` for each line of the plan. I asked whether that was too complicated for the requirements. Looking at it again, `Plan` was only a wrapper around two lists, so I told it to drop `Plan` and keep `PlanEntry`, and the scheduler now holds the lists itself. I kept `PlanEntry` because the plan has to explain each decision. I made a similar call on the tie-break rule: the AI's wording was ambiguous about what "logged first" meant, so I specified it myself (earlier time first, then creation order).
+The AI's first UML had a separate `Plan` class wrapping the scheduled/dropped lists plus `PlanEntry` — I pushed back since `Plan` was just a wrapper around two lists, so I dropped it and had `Scheduler` hold them directly, keeping only `PlanEntry` since the plan needs to explain each decision. I made a similar call on the tie-break rule, specifying "earlier time, then creation order" myself after the AI's wording left "logged first" ambiguous.
 
-I didn't take the AI's work on trust once it was written. I ran every change: the `main.py` demo, the pytest suite, and a Streamlit test run of the real app. Those runs caught a real bug. Streamlit's pet dropdown returns a copy of the pet object, so tasks added from the UI were silently going to a throwaway copy. The AI's own first benchmark of the conflict check was also unfair, because it compared different amounts of work, so I had it redo the comparison before accepting the "faster" claim. For the scheduling tests, the AI temporarily broke the code in three ways (reversed priority, no drop for a missing slot, no clear on rebuild) to confirm that the tests really fail when the logic is wrong.
+I didn't take the AI's work on trust — I ran every change: the `main.py` demo, the pytest suite, and the real Streamlit app, which caught a real bug where the pet dropdown returned a copy of the pet object so UI-added tasks silently went nowhere. I also had the AI redo an unfair first benchmark that compared different amounts of work, and confirmed the tests actually catch mistakes by deliberately breaking the code (see Testing and Verification below) and watching them fail.
 
 ---
 
@@ -152,16 +152,16 @@ With more time I would test:
 
 - What part of this project are you most satisfied with?
 
-I'm most satisfied that the scheduler explains itself. Every task in the plan is kept, moved or dropped, with a one-sentence reason like "moved from 12:30 to 12:45 because it overlapped Vet call". That came from the design decision to give each plan line its own `PlanEntry` with an outcome and reason, and it shows up in the UI, the demo script and the tests. I'm also happy that the logic stayed small and readable: a greedy priority rule is easy to predict, and the 41 tests, which I checked by deliberately breaking the code, make me trust it.
+I'm most satisfied that the scheduler explains itself — every task is kept, moved or dropped with a one-sentence reason like "moved from 12:30 to 12:45 because it overlapped Vet call," which came directly from giving each plan line its own `PlanEntry` with an outcome and reason. I'm also glad the logic stayed small and predictable, backed by 41 tests I trust because I watched them fail when I broke the code on purpose.
 
 **b. What you would improve**
 
 - If you had another iteration, what would you improve or redesign?
 
-I would first replace the greedy placement with something that can rearrange tasks, for example trying to keep the most tasks possible, while still giving a one-sentence reason for each decision. I would also let tasks have flexible time windows instead of a fixed start time, and add owner preferences such as "no walks after 6pm". On the app side, I would add automated tests for the Streamlit UI, since it is currently only checked by hand, and I would reject blank task names. Finally, I'd keep the UML updated as I code instead of checking it once at the end.
+I'd replace the greedy placement with something that can rearrange tasks to keep more of them, while still giving a one-sentence reason per decision, and add flexible time windows and owner preferences like "no walks after 6pm." I'd also add automated UI tests (currently only checked by hand), reject blank task names, and keep the UML updated as I code instead of just at the end.
 
 **c. Key takeaway**
 
 - What is one important thing you learned about designing systems or working with AI on this project?
 
-Working with AI went best when I made the decisions and the AI did the drafting. The AI drafted quickly, but it also over-built (the `Plan` wrapper class) initial designs making me have to ask it to resimplify. For system design, I learned that tightening the requirements before writing any code saved the most work. I made sure to ask AI if it understood the goal and to not make any direct changes until it has conferred with me first, getting my approval. First I would give AI the requirements, we would tighten the description and discuss some edge cases, finally AI would implement according to the given guidelines. 
+The key lesson: working with AI went best when I made the decisions and it did the drafting — it drafted quickly but also over-built on its own (like the `Plan` wrapper class), so I had to ask it to simplify. Tightening the requirements before writing any code saved the most work, and I made sure the AI confirmed it understood the goal and got my approval before making any change.
