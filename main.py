@@ -1,7 +1,12 @@
+import logging
 from datetime import time
 
 from care_ai import detect_gaps
+from logging_config import configure_logging
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 ROW = "{:<11} | {:<8} | {:<14} | {:<8} | {}"
 
@@ -54,6 +59,7 @@ def print_care_gaps(owner: Owner) -> None:
 
 
 def main() -> None:
+    logger.info("Starting PawPal+ CLI demo")
     owner = Owner("Jordan", window_start=time(7, 0), window_end=time(20, 0))
 
     rex = Pet("Rex", "dog")
@@ -91,6 +97,10 @@ def main() -> None:
         print("No conflicts found.")
 
     scheduler.build_plan()
+    logger.info(
+        "Generated schedule: %d scheduled, %d dropped, %d conflict warning(s)",
+        len(scheduler.scheduled), len(scheduler.dropped), len(warnings),
+    )
     print_plan(scheduler)
     print_care_gaps(owner)
 

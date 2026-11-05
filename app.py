@@ -6,7 +6,11 @@ from typing import Optional
 import streamlit as st
 
 from care_ai import AnthropicClaudeClient, ClaudeClient, detect_gaps, generate_suggestions
+from logging_config import configure_logging
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -15,11 +19,14 @@ st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 def get_claude_client() -> Optional[ClaudeClient]:
     """Build the Claude client once per app process, or None if no API key is configured."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.info("ANTHROPIC_API_KEY not set -- AI suggestions disabled")
         return None
     try:
-        return AnthropicClaudeClient()
+        client = AnthropicClaudeClient()
+        logger.info("Anthropic client initialized")
+        return client
     except Exception:
-        logging.exception("Failed to initialize Anthropic client")
+        logger.exception("Failed to initialize Anthropic client -- AI suggestions disabled")
         return None
 
 
@@ -85,6 +92,7 @@ with col_end:
 try:
     owner.set_window(window_start, window_end)
 except ValueError:
+    logger.warning("Rejected window change: end (%s) not after start (%s)", window_end, window_start)
     st.error("The available window must end after it starts. Keeping "
              f"{owner.window_start:%H:%M}-{owner.window_end:%H:%M}.")
 
@@ -99,7 +107,9 @@ with st.form("add_pet_form", clear_on_submit=True):
                     raise ValueError("Please say what kind of pet it is.")
                 species = other_species.strip().lower()
             owner.add_pet(Pet(pet_name.strip(), species))
+            logger.info("Added pet %r (species=%s)", pet_name.strip(), species)
         except ValueError as e:
+            logger.warning("Rejected add pet %r: %s", pet_name, e)
             st.error(str(e))
 
 if owner.pets:
@@ -131,7 +141,9 @@ if owner.pets:
                 pet.add_task(
                     Task(task_title, start, int(duration), priority, frequency)
                 )
+                logger.info("Added task %r for %s at %s", task_title, selected_pet, start)
             except ValueError as e:
+                logger.warning("Rejected add task %r for %s: %s", task_title, selected_pet, e)
                 st.error(str(e))
 else:
     st.info("Add a pet before adding tasks.")
@@ -201,6 +213,10 @@ if all_tasks:
                     if task.completed:
                         raise ValueError(f"'{task.name}' is already complete")
                     next_task = scheduler.complete_task(pet, task)
+                    logger.info(
+                        "Completed task %r for %s (next occurrence due %s)",
+                        task.name, pet.name, next_task.due_date if next_task else None,
+                    )
                     st.session_state["flash"] = (
                         f"Completed '{task.name}'. Next {task.frequency.value} occurrence "
                         f"added, due {next_task.due_date}."
@@ -212,10 +228,13 @@ if all_tasks:
                         "duration_minutes": int(new_duration),
                         "priority": new_priority, "frequency": new_frequency,
                     })
+                    logger.info("Edited task %r for %s", new_name, pet.name)
                 else:
                     pet.remove_task(task.id)
+                    logger.info("Removed task %r from %s", task.name, pet.name)
                 st.rerun()  # redraw the task table with the change
             except ValueError as e:
+                logger.warning("Rejected edit/complete/remove on task %r for %s: %s", task.name, pet.name, e)
                 st.error(str(e))
 elif owner.pets:
     st.info("No tasks yet. Add one above.")
@@ -228,6 +247,10 @@ st.caption("Places tasks by priority, moves or drops conflicts, and explains eve
 if st.button("Generate schedule"):
     scheduler.build_plan()
     conflicts = scheduler.find_conflicts()
+    logger.info(
+        "Generated schedule: %d scheduled, %d dropped, %d conflict warning(s)",
+        len(scheduler.scheduled), len(scheduler.dropped), len(conflicts),
+    )
     if conflicts:
         st.warning("Some tasks overlap (the plan below resolves them):\n\n" + "\n\n".join(conflicts))
     st.session_state["plan_scheduled"] = scheduler.scheduled
@@ -245,6 +268,7 @@ if st.button("Generate schedule"):
                 dismissed=st.session_state["dismissed_gaps"],
                 pending=previous_suggestions,
             )
+        logger.info("AI drafted %d new suggestion(s) across %d pet(s)", len(new_suggestions), len(owner.pets))
         # Keep previous suggestions only if their gap is still open and still undismissed --
         # drops stale suggestions for a gap the user already covered by adding a task manually.
         open_gaps = {pet.name: {c.key for c in detect_gaps(pet)} for pet in owner.pets}
@@ -302,8 +326,10 @@ else:
             try:
                 pet.add_task(draft.task)  # already validated when it was drafted
             except ValueError as e:
+                logger.warning("Rejected AI suggestion '%s' for %s: %s", draft.task.name, pet.name, e)
                 st.error(str(e))
             else:
+                logger.info("Approved AI suggestion '%s' (%s) for %s", draft.task.name, draft.category_key, pet.name)
                 st.session_state["ai_suggestions"].remove(draft)
                 # Rebuild the plan now instead of waiting for another "Generate schedule" click,
                 # so the approved task shows up immediately as a confirmed row, while the rest
@@ -314,6 +340,7 @@ else:
                 st.session_state["flash"] = f"Added '{draft.task.name}' for {pet.name}."
                 st.rerun()
         if reject_col.button("✕", key=f"{row_key}_reject"):
+            logger.info("Dismissed AI suggestion category %r for %s", draft.category_key, draft.pet_name)
             st.session_state["dismissed_gaps"].add((draft.pet_name, draft.category_key))
             st.session_state["ai_suggestions"].remove(draft)
             st.rerun()

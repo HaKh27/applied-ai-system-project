@@ -241,6 +241,10 @@ def draft_suggestion(
                 Priority[str(data["priority"]).upper()],
                 Frequency(str(data["frequency"]).lower()),
             )
+            logger.info(
+                "care_ai: drafted %r for %s/%s at %s (attempt %d/%d)",
+                task.name, pet.name, category.key, task.start_time, attempt + 1, max_attempts,
+            )
             return SuggestionDraft(pet.name, category.key, task, str(data["reason"]))
         except Exception as e:
             # Broad on purpose: a malformed response (ValueError/KeyError/TypeError) and a
@@ -251,6 +255,7 @@ def draft_suggestion(
                 "care_ai: attempt %d/%d for %s/%s failed: %s",
                 attempt + 1, max_attempts, pet.name, category.key, error,
             )
+    logger.warning("care_ai: giving up on %s/%s after %d attempt(s)", pet.name, category.key, max_attempts)
     return None
 
 
@@ -267,6 +272,7 @@ def _deconflict_drafts(drafts: List[SuggestionDraft], pet: Pet) -> List[Suggesti
     result = []
     for draft in sorted(drafts, key=lambda d: d.task.start_time):
         task = draft.task
+        original_start = task.start_time
         while True:
             clash = next((t for t in placed if task.overlaps(t)), None)
             if clash is None:
@@ -277,7 +283,16 @@ def _deconflict_drafts(drafts: List[SuggestionDraft], pet: Pet) -> List[Suggesti
                 task = None
                 break
         if task is None:
+            logger.warning(
+                "care_ai: dropped suggestion %r for %s/%s -- no free slot after de-conflicting",
+                draft.task.name, pet.name, draft.category_key,
+            )
             continue
+        if task.start_time != original_start:
+            logger.info(
+                "care_ai: nudged suggestion %r for %s from %s to %s to avoid a collision",
+                task.name, pet.name, original_start, task.start_time,
+            )
         placed.append(task)
         draft.task = task
         result.append(draft)
@@ -302,5 +317,7 @@ def generate_suggestions(
         if (pet.name, category.key) not in dismissed_set
         and (pet.name, category.key) not in pending_keys
     ]
+    if gaps:
+        logger.info("care_ai: %d new gap(s) for %s: %s", len(gaps), pet.name, [c.key for c in gaps])
     drafts = [draft_suggestion(client, pet, owner, category) for category in gaps]
     return _deconflict_drafts([d for d in drafts if d is not None], pet)
