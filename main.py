@@ -1,5 +1,6 @@
 from datetime import time
 
+from care_ai import detect_gaps
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task
 
 ROW = "{:<11} | {:<8} | {:<14} | {:<8} | {}"
@@ -36,6 +37,20 @@ def print_plan(scheduler) -> None:
         print(f"{e.task.start_time:%H:%M}  {e.pet_name:<5} {e.task.name:<14} {e.reason}")
     if not scheduler.dropped:
         print("(none)")
+
+
+def print_care_gaps(owner: Owner) -> None:
+    """Print deterministic care-gap categories per pet (no AI call: the CLI has no
+    approve/reject flow, so drafting a suggestion nobody can act on would just burn an API call
+    for discardable output). Run the Streamlit app to see and approve AI-drafted suggestions.
+    """
+    print("\nCare gaps (see the Streamlit app for AI-drafted suggestions)")
+    for pet in owner.pets:
+        gaps = detect_gaps(pet)
+        if gaps:
+            print(f"{pet.name}: missing {', '.join(g.key for g in gaps)}")
+        else:
+            print(f"{pet.name}: no gaps detected")
 
 
 def main() -> None:
@@ -77,6 +92,7 @@ def main() -> None:
 
     scheduler.build_plan()
     print_plan(scheduler)
+    print_care_gaps(owner)
 
     # Recurring tasks: completing a daily or weekly task creates the next occurrence.
     print("\nCompleting recurring tasks")

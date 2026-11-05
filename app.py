@@ -1,15 +1,42 @@
+import logging
+import os
 from datetime import time
+from typing import Optional
 
 import streamlit as st
 
+from care_ai import AnthropicClaudeClient, ClaudeClient, detect_gaps, generate_suggestions
 from pawpal_system import Frequency, Owner, Pet, Priority, Scheduler, Task
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
+
+
+@st.cache_resource
+def get_claude_client() -> Optional[ClaudeClient]:
+    """Build the Claude client once per app process, or None if no API key is configured."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        return AnthropicClaudeClient()
+    except Exception:
+        logging.exception("Failed to initialize Anthropic client")
+        return None
+
 
 # Streamlit reruns this script on every interaction, so keep the Owner in session state.
 if "owner" not in st.session_state:
     st.session_state.owner = Owner("Jordan", time(7, 0), time(20, 0))
 owner = st.session_state.owner
+
+# AI suggestion state: dismissed gaps are never re-suggested this session, and the pending
+# suggestion list survives reruns so Approve/Reject buttons work after the page redraws.
+st.session_state.setdefault("dismissed_gaps", set())
+st.session_state.setdefault("ai_suggestions", [])
+# The last generated plan is also kept in session state (not just read off a fresh Scheduler)
+# so it keeps showing, alongside pending AI suggestions, across the reruns an Approve/Reject
+# click triggers -- those reruns don't re-press "Generate schedule".
+st.session_state.setdefault("plan_scheduled", [])
+st.session_state.setdefault("plan_dropped", [])
 
 st.title("🐾 PawPal+")
 
@@ -203,33 +230,104 @@ if st.button("Generate schedule"):
     conflicts = scheduler.find_conflicts()
     if conflicts:
         st.warning("Some tasks overlap (the plan below resolves them):\n\n" + "\n\n".join(conflicts))
-    if scheduler.scheduled:
-        st.success(f"Today's plan for {owner.name}")
-        st.table(
-            [
-                {
-                    "Time": e.time_range(),
-                    "Pet Name": e.pet_name,
-                    "Activity": e.task.name,
-                    "Priority": e.task.priority.name,
-                    "Outcome": e.outcome.value,
-                    "Reason": e.reason,
-                }
-                for e in scheduler.scheduled
-            ]
-        )
+    st.session_state["plan_scheduled"] = scheduler.scheduled
+    st.session_state["plan_dropped"] = scheduler.dropped
+
+    claude_client = get_claude_client()
+    if claude_client is None:
+        st.caption("AI suggestions unavailable: set the ANTHROPIC_API_KEY environment variable to enable them.")
     else:
-        st.info("Nothing to schedule today. Add some tasks above.")
-    if scheduler.dropped:
-        st.write("Dropped tasks:")
-        st.table(
-            [
-                {
-                    "Requested time": e.task.start_time.strftime("%H:%M"),
-                    "Pet Name": e.pet_name,
-                    "Activity": e.task.name,
-                    "Reason": e.reason,
-                }
-                for e in scheduler.dropped
-            ]
-        )
+        previous_suggestions = st.session_state["ai_suggestions"]
+        new_suggestions = []
+        for pet in owner.pets:
+            new_suggestions += generate_suggestions(
+                claude_client, owner, pet,
+                dismissed=st.session_state["dismissed_gaps"],
+                pending=previous_suggestions,
+            )
+        # Keep previous suggestions only if their gap is still open and still undismissed --
+        # drops stale suggestions for a gap the user already covered by adding a task manually.
+        open_gaps = {pet.name: {c.key for c in detect_gaps(pet)} for pet in owner.pets}
+        kept_suggestions = [
+            d for d in previous_suggestions
+            if d.category_key in open_gaps.get(d.pet_name, set())
+            and (d.pet_name, d.category_key) not in st.session_state["dismissed_gaps"]
+        ]
+        st.session_state["ai_suggestions"] = kept_suggestions + new_suggestions
+
+# Today's plan: confirmed tasks (green, already validated by the scheduler) and pending AI
+# suggestions (red, awaiting approval) rendered together as one chronological list, so a
+# suggestion reads as a row in the schedule rather than a separate section. Read from session
+# state (not straight off `scheduler`) so this keeps showing across the reruns an Approve/Reject
+# click triggers -- those reruns don't re-press "Generate schedule".
+plan_rows = [(e.final_start, "confirmed", e) for e in st.session_state["plan_scheduled"]]
+plan_rows += [(d.task.start_time, "suggestion", d) for d in st.session_state["ai_suggestions"]]
+plan_rows.sort(key=lambda row: row[0])
+
+ROW_WIDTHS = (1.1, 1.1, 1.8, 0.9, 2.8, 1.3)
+
+if not plan_rows:
+    st.info('Nothing to schedule today yet. Add some tasks above, then click "Generate schedule."')
+else:
+    st.write(f"Today's plan for {owner.name}")
+    header_cols = st.columns(ROW_WIDTHS)
+    for col, label in zip(header_cols, ("Time", "Pet", "Activity", "Priority", "Status", "Action")):
+        col.markdown(f"**{label}**")
+
+    for _, kind, payload in plan_rows:
+        row = st.columns(ROW_WIDTHS)
+        if kind == "confirmed":
+            entry = payload
+            row[0].write(entry.time_range())
+            row[1].write(entry.pet_name)
+            row[2].write(entry.task.name)
+            row[3].write(entry.task.priority.name)
+            row[4].markdown(f":green[{entry.outcome.value}] — {entry.reason}")
+            row[5].write("✅")
+            continue
+
+        draft = payload
+        pet = next((p for p in owner.pets if p.name == draft.pet_name), None)
+        if pet is None:
+            st.session_state["ai_suggestions"].remove(draft)
+            continue
+        row_key = f"suggestion_{draft.pet_name}_{draft.category_key}"
+        row[0].write(draft.task.start_time.strftime("%H:%M"))
+        row[1].write(draft.pet_name)
+        row[2].write(draft.task.name)
+        row[3].write(draft.task.priority.name)
+        row[4].markdown(f":red[Needs approval] — {draft.reason}")
+        keep_col, reject_col = row[5].columns(2)
+        if keep_col.button("Keep", key=f"{row_key}_keep"):
+            try:
+                pet.add_task(draft.task)  # already validated when it was drafted
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state["ai_suggestions"].remove(draft)
+                # Rebuild the plan now instead of waiting for another "Generate schedule" click,
+                # so the approved task shows up immediately as a confirmed row, while the rest
+                # of the pending suggestions stay listed below for review.
+                scheduler.build_plan()
+                st.session_state["plan_scheduled"] = scheduler.scheduled
+                st.session_state["plan_dropped"] = scheduler.dropped
+                st.session_state["flash"] = f"Added '{draft.task.name}' for {pet.name}."
+                st.rerun()
+        if reject_col.button("✕", key=f"{row_key}_reject"):
+            st.session_state["dismissed_gaps"].add((draft.pet_name, draft.category_key))
+            st.session_state["ai_suggestions"].remove(draft)
+            st.rerun()
+
+if st.session_state["plan_dropped"]:
+    st.write("Dropped tasks:")
+    st.table(
+        [
+            {
+                "Requested time": e.task.start_time.strftime("%H:%M"),
+                "Pet Name": e.pet_name,
+                "Activity": e.task.name,
+                "Reason": e.reason,
+            }
+            for e in st.session_state["plan_dropped"]
+        ]
+    )
